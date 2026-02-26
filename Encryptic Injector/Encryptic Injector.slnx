@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Encryptic Injector/Encryptic Injector.vcxproj" Id="1a849a6b-cb2b-41ef-b27b-d139a6870e73" />
+</Solution>

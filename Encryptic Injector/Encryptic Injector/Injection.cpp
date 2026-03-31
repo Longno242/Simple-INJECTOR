@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <string>
 #include <vector>
 #include <thread>
@@ -8,7 +10,13 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
-#include <cmath>
+#include <format>
+#include <atomic>
+#include <cstdlib>
+#include <cstdarg>
+#include <cstring>
+#include <cctype>
+#include <wchar.h>
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 #include "imgui/backends/imgui_impl_win32.h"
@@ -17,13 +25,12 @@
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 
-#ifdef _CONSOLE
-int main() {
-    return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWDEFAULT);
-}
-#endif
-
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "ole32.lib")
+
+#ifdef _CONSOLE
+int main() { return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWDEFAULT); }
+#endif
 
 HWND g_hwnd = nullptr;
 ID3D11Device* g_pd3dDevice = nullptr;
@@ -33,345 +40,375 @@ ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
 struct AppState {
     bool running = true;
-    bool show_success = false;
-    bool show_error = false;
-    float success_alpha = 0.0f;
-    float error_alpha = 0.0f;
-    std::string status_message;
+    char dll_path[512] = "";
     std::string selected_dll;
     std::string selected_process;
     DWORD selected_pid = 0;
     std::vector<std::pair<std::string, DWORD>> processes;
-    char dll_path[512] = "";
     char process_filter[256] = "";
-    bool inject_on_select = false;
     bool auto_close = false;
     int injection_method = 0;
-    float animation_time = 0.0f;
+    std::string status_message;
+    float status_timer = 0.0f;
+    int status_type = 0;
+    float animation_offset = 0.0f;
+    bool show_settings = false;
+    bool show_about = false;
 };
 
 static AppState g_state;
 
 namespace Colors {
-    constexpr ImU32 Background = IM_COL32(10, 10, 12, 255);
-    constexpr ImU32 BackgroundLight = IM_COL32(18, 18, 22, 255);
-    constexpr ImU32 Surface = IM_COL32(28, 28, 35, 255);
-    constexpr ImU32 SurfaceHover = IM_COL32(35, 35, 45, 255);
-    constexpr ImU32 SurfaceActive = IM_COL32(45, 45, 60, 255);
-    constexpr ImU32 Border = IM_COL32(50, 50, 65, 255);
-    constexpr ImU32 BorderActive = IM_COL32(80, 80, 100, 255);
-    constexpr ImU32 Accent = IM_COL32(136, 86, 255, 255);
-    constexpr ImU32 AccentHover = IM_COL32(160, 120, 255, 255);
-    constexpr ImU32 AccentActive = IM_COL32(120, 70, 230, 255);
-    constexpr ImU32 TextPrimary = IM_COL32(255, 255, 255, 255);
-    constexpr ImU32 TextSecondary = IM_COL32(180, 180, 190, 255);
-    constexpr ImU32 TextMuted = IM_COL32(120, 120, 130, 255);
-    constexpr ImU32 Success = IM_COL32(50, 220, 120, 255);
-    constexpr ImU32 Error = IM_COL32(255, 80, 80, 255);
-    constexpr ImU32 Warning = IM_COL32(255, 180, 60, 255);
+    constexpr ImU32 DarkBg = IM_COL32(18, 22, 27, 255);
+    constexpr ImU32 DarkerBg = IM_COL32(13, 17, 22, 255);
+    constexpr ImU32 CardBg = IM_COL32(28, 32, 37, 255);
+    constexpr ImU32 HoverBg = IM_COL32(38, 42, 47, 255);
+    constexpr ImU32 Accent = IM_COL32(88, 156, 255, 255);
+    constexpr ImU32 AccentHover = IM_COL32(108, 176, 255, 255);
+    constexpr ImU32 Success = IM_COL32(46, 204, 113, 255);
+    constexpr ImU32 Error = IM_COL32(231, 76, 60, 255);
+    constexpr ImU32 Warning = IM_COL32(241, 196, 15, 255);
+    constexpr ImU32 TextPrimary = IM_COL32(236, 240, 241, 255);
+    constexpr ImU32 TextSecondary = IM_COL32(149, 165, 166, 255);
+    constexpr ImU32 Border = IM_COL32(52, 58, 64, 255);
+}
+
+static std::string ToLowerAscii(const std::string& s) {
+    std::string out; out.reserve(s.size());
+    for (unsigned char c : s) out.push_back((char)std::tolower(c));
+    return out;
+}
+
+static bool IsDllFilePath(const char* path) {
+    if (!path) return false;
+    std::string p(path);
+    auto pos = p.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = ToLowerAscii(p.substr(pos));
+    return ext == ".dll";
 }
 
 std::string GetLastErrorAsString() {
-    DWORD errorMessageID = ::GetLastError();
-    if (errorMessageID == 0) return std::string();
-
-    LPSTR messageBuffer = nullptr;
-    size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
-
-    std::string message(messageBuffer, size);
-    LocalFree(messageBuffer);
-    return message;
+    DWORD err = GetLastError();
+    if (err == 0) return "Unknown error";
+    LPSTR buf = nullptr;
+    FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+        nullptr, err, 0, (LPSTR)&buf, 0, nullptr);
+    std::string msg(buf);
+    LocalFree(buf);
+    return msg;
 }
 
 std::vector<std::pair<std::string, DWORD>> GetProcessList() {
-    std::vector<std::pair<std::string, DWORD>> processes;
+    std::vector<std::pair<std::string, DWORD>> procs;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return processes;
+    if (snap == INVALID_HANDLE_VALUE) return procs;
 
-    PROCESSENTRY32 pe;
-    pe.dwSize = sizeof(PROCESSENTRY32);
-
+    PROCESSENTRY32 pe{ sizeof(PROCESSENTRY32) };
     if (Process32First(snap, &pe)) {
         do {
             std::string name = pe.szExeFile;
-            if (name != "svchost.exe" && name != "csrss.exe" && name != "smss.exe" && name != "services.exe" && name != "lsass.exe" && name != "winlogon.exe") { processes.push_back({ name, pe.th32ProcessID });
-            }
+            if (name != "System" && name != "svchost.exe" && name != "csrss.exe" && name != "smss.exe" && name != "services.exe" && name != "lsass.exe" && name != "winlogon.exe" && name != "Registry" && name != "Idle") procs.emplace_back(name, pe.th32ProcessID);
         } while (Process32Next(snap, &pe));
     }
-
     CloseHandle(snap);
+    std::ranges::sort(procs, {}, &std::pair<std::string, DWORD>::first);
+    return procs;
+}
 
-    std::sort(processes.begin(), processes.end(),
-        [](const auto& a, const auto& b) { return a.first < b.first; });
+bool InjectLoadLibrary(DWORD pid, const std::string& dllPath) {
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProc) return false;
 
-    return processes;
+    SIZE_T size = dllPath.size() + 1;
+    LPVOID alloc = VirtualAllocEx(hProc, nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!alloc) { CloseHandle(hProc); return false; }
+
+    if (!WriteProcessMemory(hProc, alloc, dllPath.c_str(), size, nullptr)) {
+        VirtualFreeEx(hProc, alloc, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    HMODULE hKernel = GetModuleHandleA("kernel32.dll");
+    auto pLoadLib = (LPTHREAD_START_ROUTINE)GetProcAddress(hKernel, "LoadLibraryA");
+
+    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0, pLoadLib, alloc, 0, nullptr);
+    if (!hThread) {
+        VirtualFreeEx(hProc, alloc, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    WaitForSingleObject(hThread, 8000);
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+
+    VirtualFreeEx(hProc, alloc, 0, MEM_RELEASE);
+    CloseHandle(hThread);
+    CloseHandle(hProc);
+    return exitCode != 0;
+}
+
+bool ManualMap(DWORD pid, const std::string& dllPath) {
+    std::ifstream file(dllPath, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    size_t fileSize = file.tellg();
+    file.seekg(0);
+    std::vector<uint8_t> dllData(fileSize);
+    file.read(reinterpret_cast<char*>(dllData.data()), fileSize);
+
+    IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(dllData.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(dllData.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProc) return false;
+
+    LPVOID base = VirtualAllocEx(hProc, nullptr, nt->OptionalHeader.SizeOfImage,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!base) { CloseHandle(hProc); return false; }
+
+    WriteProcessMemory(hProc, base, dllData.data(), nt->OptionalHeader.SizeOfHeaders, nullptr);
+
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (section->SizeOfRawData == 0) {
+            section++;
+            continue;
+        }
+        LPVOID secDest = (LPVOID)((uintptr_t)base + section->VirtualAddress);
+        WriteProcessMemory(hProc, secDest, dllData.data() + section->PointerToRawData,
+            section->SizeOfRawData, nullptr);
+        section++;
+    }
+
+    uintptr_t delta = (uintptr_t)base - nt->OptionalHeader.ImageBase;
+    if (delta) {
+        IMAGE_DATA_DIRECTORY* relocDir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        if (relocDir->Size) {
+            IMAGE_BASE_RELOCATION* reloc = reinterpret_cast<IMAGE_BASE_RELOCATION*>(
+                dllData.data() + relocDir->VirtualAddress);
+
+            while (reloc->SizeOfBlock) {
+                WORD* typeOffset = (WORD*)((uintptr_t)reloc + sizeof(IMAGE_BASE_RELOCATION));
+                DWORD entries = (reloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
+
+                for (DWORD i = 0; i < entries; ++i) {
+                    WORD entry = typeOffset[i];
+                    WORD type = entry >> 12;
+                    WORD offset = entry & 0xFFF;
+
+                    if (type == IMAGE_REL_BASED_DIR64) {
+                        uintptr_t* patch = (uintptr_t*)((uintptr_t)base + reloc->VirtualAddress + offset);
+                        DWORD64 temp = 0;
+                        ReadProcessMemory(hProc, patch, &temp, sizeof(DWORD64), nullptr);
+                        temp += delta;
+                        WriteProcessMemory(hProc, patch, &temp, sizeof(DWORD64), nullptr);
+                    }
+                }
+                reloc = (IMAGE_BASE_RELOCATION*)((uintptr_t)reloc + reloc->SizeOfBlock);
+            }
+        }
+    }
+
+    IMAGE_DATA_DIRECTORY* importDir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir->Size) {
+        IMAGE_IMPORT_DESCRIPTOR* importDesc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+            dllData.data() + importDir->VirtualAddress);
+
+        while (importDesc->Name) {
+            char* dllName = (char*)(dllData.data() + importDesc->Name);
+            HMODULE hModule = LoadLibraryA(dllName);
+
+            uintptr_t* thunk = (uintptr_t*)((uintptr_t)base + importDesc->FirstThunk);
+            uintptr_t* origThunk = (uintptr_t*)((uintptr_t)base + importDesc->OriginalFirstThunk);
+
+            while (*origThunk) {
+                if (*origThunk & IMAGE_ORDINAL_FLAG) {
+                    uintptr_t func = (uintptr_t)GetProcAddress(hModule, MAKEINTRESOURCEA(*origThunk & 0xFFFF));
+                    WriteProcessMemory(hProc, thunk, &func, sizeof(uintptr_t), nullptr);
+                }
+                else {
+                    IMAGE_IMPORT_BY_NAME* ibn = (IMAGE_IMPORT_BY_NAME*)(dllData.data() + *origThunk);
+                    uintptr_t func = (uintptr_t)GetProcAddress(hModule, ibn->Name);
+                    WriteProcessMemory(hProc, thunk, &func, sizeof(uintptr_t), nullptr);
+                }
+                thunk++;
+                origThunk++;
+            }
+            importDesc++;
+        }
+    }
+
+    auto dllMain = (BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID))((uintptr_t)base + nt->OptionalHeader.AddressOfEntryPoint);
+    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
+        (LPTHREAD_START_ROUTINE)dllMain, base, 0, nullptr);
+
+    if (hThread) {
+        WaitForSingleObject(hThread, 5000);
+        CloseHandle(hThread);
+    }
+
+    CloseHandle(hProc);
+    return true;
 }
 
 bool InjectDLL(DWORD pid, const std::string& dllPath, int method) {
-    if (method == 0) {
-        HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-        if (!hProcess) return false;
-
-        LPVOID allocMem = VirtualAllocEx(hProcess, NULL, dllPath.size() + 1,
-            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (!allocMem) {
-            CloseHandle(hProcess);
-            return false;
-        }
-
-        if (!WriteProcessMemory(hProcess, allocMem, dllPath.c_str(),
-            dllPath.size() + 1, NULL)) {
-            VirtualFreeEx(hProcess, allocMem, 0, MEM_RELEASE);
-            CloseHandle(hProcess);
-            return false;
-        }
-
-        HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-        LPTHREAD_START_ROUTINE loadLibraryAddr = (LPTHREAD_START_ROUTINE)GetProcAddress(
-            hKernel32, "LoadLibraryA");
-
-        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, loadLibraryAddr,
-            allocMem, 0, NULL);
-        if (!hThread) {
-            VirtualFreeEx(hProcess, allocMem, 0, MEM_RELEASE);
-            CloseHandle(hProcess);
-            return false;
-        }
-
-        WaitForSingleObject(hThread, INFINITE);
-        VirtualFreeEx(hProcess, allocMem, 0, MEM_RELEASE);
-        CloseHandle(hThread);
-        CloseHandle(hProcess);
-        return true;
-    }
-    return false;
+    if (method == 0)
+        return InjectLoadLibrary(pid, dllPath);
+    else
+        return ManualMap(pid, dllPath);
 }
 
-void SetupImGuiStyle() {
+void SetupModernStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* colors = style.Colors;
+    auto& c = style.Colors;
 
-    colors[ImGuiCol_WindowBg] = ImColor(Colors::Background);
-    colors[ImGuiCol_ChildBg] = ImColor(Colors::Surface);
-    colors[ImGuiCol_PopupBg] = ImColor(Colors::Surface);
-    colors[ImGuiCol_Border] = ImColor(Colors::Border);
-    colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_Text] = ImColor(Colors::TextPrimary);
-    colors[ImGuiCol_TextDisabled] = ImColor(Colors::TextMuted);
-    colors[ImGuiCol_TextSelectedBg] = ImColor(Colors::Accent);
-    colors[ImGuiCol_Button] = ImColor(Colors::Surface);
-    colors[ImGuiCol_ButtonHovered] = ImColor(Colors::Accent);
-    colors[ImGuiCol_ButtonActive] = ImColor(Colors::AccentActive);
-    colors[ImGuiCol_Header] = ImColor(Colors::Surface);
-    colors[ImGuiCol_HeaderHovered] = ImColor(Colors::SurfaceHover);
-    colors[ImGuiCol_HeaderActive] = ImColor(Colors::Accent);
-    colors[ImGuiCol_FrameBg] = ImColor(Colors::BackgroundLight);
-    colors[ImGuiCol_FrameBgHovered] = ImColor(Colors::Surface);
-    colors[ImGuiCol_FrameBgActive] = ImColor(Colors::SurfaceHover);
-    colors[ImGuiCol_CheckMark] = ImColor(Colors::Accent);
-    colors[ImGuiCol_SliderGrab] = ImColor(Colors::Accent);
-    colors[ImGuiCol_SliderGrabActive] = ImColor(Colors::AccentActive);
-    colors[ImGuiCol_ScrollbarBg] = ImColor(Colors::Background);
-    colors[ImGuiCol_ScrollbarGrab] = ImColor(Colors::SurfaceHover);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImColor(Colors::Accent);
-    colors[ImGuiCol_ScrollbarGrabActive] = ImColor(Colors::AccentActive);
-    colors[ImGuiCol_Separator] = ImColor(Colors::Border);
-    colors[ImGuiCol_SeparatorHovered] = ImColor(Colors::Accent);
-    colors[ImGuiCol_SeparatorActive] = ImColor(Colors::Accent);
-    colors[ImGuiCol_ResizeGrip] = ImColor(Colors::Border);
-    colors[ImGuiCol_ResizeGripHovered] = ImColor(Colors::Accent);
-    colors[ImGuiCol_ResizeGripActive] = ImColor(Colors::AccentActive);
-    colors[ImGuiCol_TitleBg] = ImColor(Colors::Background);
-    colors[ImGuiCol_TitleBgActive] = ImColor(Colors::Surface);
-    colors[ImGuiCol_TitleBgCollapsed] = ImColor(Colors::Background);
-    colors[ImGuiCol_PlotLines] = ImColor(Colors::Accent);
-    colors[ImGuiCol_PlotLinesHovered] = ImColor(Colors::AccentHover);
-    colors[ImGuiCol_PlotHistogram] = ImColor(Colors::Accent);
-    colors[ImGuiCol_PlotHistogramHovered] = ImColor(Colors::AccentHover);
-
-    style.WindowRounding = 8.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 6.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 1.0f;
-    style.PopupBorderSize = 1.0f;
-    style.WindowPadding = ImVec2(12, 12);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(8, 6);
-    style.ItemInnerSpacing = ImVec2(6, 4);
-    style.GrabMinSize = 12.0f;
+    style.WindowRounding = 12.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 8.0f;
+    style.PopupRounding = 8.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.GrabRounding = 6.0f;
+    style.TabRounding = 6.0f;
+    style.WindowPadding = ImVec2(20, 20);
+    style.FramePadding = ImVec2(12, 8);
+    style.ItemSpacing = ImVec2(12, 12);
+    style.ItemInnerSpacing = ImVec2(8, 6);
+    style.IndentSpacing = 25.0f;
     style.ScrollbarSize = 10.0f;
-}
+    style.GrabMinSize = 10.0f;
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+    style.TabRounding = 8.0f;
+    style.ItemSpacing.x = 18.0f;
+    style.ItemInnerSpacing.y = 10.0f;
+    style.TabBorderSize = 1.0f;
 
-void GlowButton(const char* label, const ImVec2& size_arg = ImVec2(0, 0),
-    ImU32 glow_color = Colors::Accent) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    ImGuiContext& g = *GImGui;
-    const ImGuiStyle& style = g.Style;
-    const ImGuiID id = window->GetID(label);
-    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
-
-    ImVec2 pos = window->DC.CursorPos;
-    ImVec2 size = ImGui::CalcItemSize(size_arg,
-        label_size.x + style.FramePadding.x * 2.0f,
-        label_size.y + style.FramePadding.y * 2.0f);
-
-    const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
-    ImGui::ItemSize(size, style.FramePadding.y);
-    if (!ImGui::ItemAdd(bb, id)) return;
-
-    bool hovered, held;
-    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
-
-    if (hovered || held) {
-        float glow_intensity = held ? 1.0f : 0.6f;
-        for (int i = 3; i > 0; i--) {
-            float alpha = (0.3f - i * 0.08f) * glow_intensity;
-            window->DrawList->AddRect(
-                ImVec2(bb.Min.x - i, bb.Min.y - i),
-                ImVec2(bb.Max.x + i, bb.Max.y + i),
-                ImColor(ImColor(glow_color).Value.x, ImColor(glow_color).Value.y,
-                    ImColor(glow_color).Value.z, alpha),
-                style.FrameRounding + i, 0, 2.0f
-            );
-        }
+    c[ImGuiCol_Text] = ImColor(Colors::TextPrimary);
+    c[ImGuiCol_TextDisabled] = ImColor(Colors::TextSecondary);
+    c[ImGuiCol_WindowBg] = ImColor(Colors::DarkBg);
+    c[ImGuiCol_ChildBg] = ImColor(Colors::CardBg);
+    c[ImGuiCol_PopupBg] = ImColor(Colors::CardBg);
+    c[ImGuiCol_Border] = ImColor(Colors::Border);
+    c[ImGuiCol_BorderShadow] = ImColor(0, 0, 0, 0);
+    c[ImGuiCol_FrameBg] = ImColor(Colors::DarkerBg);
+    c[ImGuiCol_FrameBgHovered] = ImColor(Colors::HoverBg);
+    c[ImGuiCol_FrameBgActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_TitleBg] = ImColor(Colors::CardBg);
+    c[ImGuiCol_TitleBgActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_TitleBgCollapsed] = ImColor(Colors::CardBg);
+    c[ImGuiCol_MenuBarBg] = ImColor(Colors::CardBg);
+    c[ImGuiCol_ScrollbarBg] = ImColor(Colors::DarkerBg);
+    c[ImGuiCol_ScrollbarGrab] = ImColor(Colors::HoverBg);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImColor(Colors::Accent);
+    c[ImGuiCol_ScrollbarGrabActive] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_CheckMark] = ImColor(Colors::Accent);
+    c[ImGuiCol_SliderGrab] = ImColor(Colors::Accent);
+    c[ImGuiCol_SliderGrabActive] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_Button] = ImColor(Colors::Accent);
+    c[ImGuiCol_ButtonHovered] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_ButtonActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_Header] = ImColor(Colors::CardBg);
+    c[ImGuiCol_HeaderHovered] = ImColor(Colors::HoverBg);
+    c[ImGuiCol_HeaderActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_Separator] = ImColor(Colors::Border);
+    c[ImGuiCol_SeparatorHovered] = ImColor(Colors::Accent);
+    c[ImGuiCol_SeparatorActive] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_ResizeGrip] = ImColor(Colors::Border);
+    c[ImGuiCol_ResizeGripHovered] = ImColor(Colors::Accent);
+    c[ImGuiCol_ResizeGripActive] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_Tab] = ImColor(Colors::CardBg);
+    c[ImGuiCol_TabHovered] = ImColor(Colors::HoverBg);
+    c[ImGuiCol_TabActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_TabUnfocused] = ImColor(Colors::CardBg);
+    c[ImGuiCol_TabUnfocusedActive] = ImColor(Colors::Accent);
+    c[ImGuiCol_PlotLines] = ImColor(Colors::Accent);
+    c[ImGuiCol_PlotLinesHovered] = ImColor(Colors::AccentHover);
+    c[ImGuiCol_PlotHistogram] = ImColor(Colors::Accent);
+    c[ImGuiCol_PlotHistogramHovered] = ImColor(Colors::AccentHover);
+    {
+        ImVec4 col = ImColor(Colors::Accent).Value;
+        col.w *= 0.35f;
+        c[ImGuiCol_TextSelectedBg] = col;
     }
-
-    ImU32 col = held ? Colors::AccentActive : (hovered ? Colors::Accent : Colors::Surface);
-    ImGui::RenderFrame(bb.Min, bb.Max, col, true, style.FrameRounding);
-
-    ImVec2 text_pos = ImVec2(
-        bb.Min.x + (size.x - label_size.x) * 0.5f,
-        bb.Min.y + (size.y - label_size.y) * 0.5f
-    );
-    window->DrawList->AddText(text_pos, Colors::TextPrimary, label);
-
-    if (pressed) g_state.animation_time = 0.0f;
-}
-
-void ModernCheckbox(const char* label, bool* v) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems) return;
-
-    ImGuiContext& g = *GImGui;
-    const ImGuiStyle& style = g.Style;
-    const ImGuiID id = window->GetID(label);
-    const ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
-
-    const float square_sz = ImGui::GetFrameHeight();
-    const ImVec2 pos = window->DC.CursorPos;
-    const ImRect total_bb(pos, ImVec2(pos.x + square_sz + (label_size.x > 0.0f ? style.ItemInnerSpacing.x + label_size.x : 0.0f),
-        pos.y + label_size.y + style.FramePadding.y * 2.0f));
-    const ImRect check_bb(pos, ImVec2(pos.x + square_sz, pos.y + square_sz));
-
-    ImGui::ItemSize(total_bb, style.FramePadding.y);
-    if (!ImGui::ItemAdd(total_bb, id)) return;
-
-    bool hovered, held;
-    bool pressed = ImGui::ButtonBehavior(total_bb, id, &hovered, &held);
-    if (pressed) {
-        *v = !(*v);
-        ImGui::MarkItemEdited(id);
+    {
+        ImVec4 col = ImColor(Colors::Accent).Value;
+        col.w *= 0.5f;
+        c[ImGuiCol_DragDropTarget] = col;
     }
-
-    const ImU32 col = ImGui::GetColorU32((held && hovered) ? ImGuiCol_FrameBgActive : hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg);
-    ImGui::RenderFrame(check_bb.Min, check_bb.Max, col, true, style.FrameRounding);
-
-    if (*v) {
-        const float pad = (std::max)(1.0f, std::floor(square_sz / 6.0f));
-        const float thickness = (std::max)(2.0f, square_sz / 5.0f);
-
-        float anim = sinf(g_state.animation_time * 10.0f) * 0.5f + 0.5f;
-        ImU32 check_col = ImColor(Colors::Accent);
-
-        ImVec2 points[3] = {
-            ImVec2(check_bb.Min.x + pad, check_bb.Min.y + square_sz / 2.0f),
-            ImVec2(check_bb.Min.x + square_sz / 2.0f, check_bb.Max.y - pad),
-            ImVec2(check_bb.Max.x - pad, check_bb.Min.y + pad)
-        };
-
-        window->DrawList->AddPolyline(points, 3, check_col, false, thickness);
-    }
-
-    if (label_size.x > 0.0f) {
-        ImGui::RenderText(ImVec2(check_bb.Max.x + style.ItemInnerSpacing.x,
-            check_bb.Min.y + style.FramePadding.y), label);
-    }
+    c[ImGuiCol_NavHighlight] = ImColor(Colors::Accent);
+    c[ImGuiCol_NavWindowingHighlight] = ImColor(Colors::Accent);
 }
 
 void RenderUI() {
     ImGuiIO& io = ImGui::GetIO();
-    ImVec2 display_size = io.DisplaySize;
+    ImVec2 display = io.DisplaySize;
 
-    ImDrawList* bg_draw = ImGui::GetBackgroundDrawList();
-    ImU32 col_top = IM_COL32(15, 15, 18, 255);
-    ImU32 col_bottom = IM_COL32(8, 8, 10, 255);
-    bg_draw->AddRectFilledMultiColor(ImVec2(0, 0), display_size, col_top, col_top, col_bottom, col_bottom);
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    bg->AddRectFilledMultiColor(ImVec2(0, 0), display,
+        IM_COL32(18, 22, 27, 255), IM_COL32(18, 22, 27, 255),
+        IM_COL32(13, 17, 22, 255), IM_COL32(13, 17, 22, 255));
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(display_size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::SetNextWindowSize(display);
+    ImGui::Begin("##MainWindow", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
 
-    ImGui::Begin("Injector", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    float windowWidth = ImGui::GetWindowWidth();
+    float windowHeight = ImGui::GetWindowHeight();
 
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    ImVec2 window_pos = ImGui::GetWindowPos();
-    ImVec2 window_size = ImGui::GetWindowSize();
+    ImGui::BeginChild("Header", ImVec2(windowWidth - 40, 80), false);
+    ImDrawList* headerDraw = ImGui::GetWindowDrawList();
+    ImVec2 headerPos = ImGui::GetCursorScreenPos();
+    headerDraw->AddRectFilled(headerPos, ImVec2(headerPos.x + windowWidth - 40, headerPos.y + 80),
+        IM_COL32(28, 32, 37, 255), 12.0f, ImDrawFlags_RoundCornersTop);
 
-    draw_list->AddRectFilled(
-        ImVec2(window_pos.x, window_pos.y),
-        ImVec2(window_pos.x + window_size.x, window_pos.y + 60),
-        IM_COL32(20, 20, 25, 255), 8.0f, ImDrawFlags_RoundCornersTop
-    );
-
-    draw_list->AddRectFilled(
-        ImVec2(window_pos.x + 20, window_pos.y + 58),
-        ImVec2(window_pos.x + window_size.x - 20, window_pos.y + 60),
-        Colors::Accent
-    );
-
-    ImGui::SetCursorPos(ImVec2(25, 18));
+    ImGui::SetCursorPosX(20);
+    ImGui::SetCursorPosY(20);
     ImGui::PushFont(io.Fonts->Fonts[0]);
+    ImGui::TextColored(ImColor(Colors::Accent), "Encryptic");
+    ImGui::SameLine(0, 8);
     ImGui::TextColored(ImColor(Colors::TextPrimary), "INJECTOR");
     ImGui::PopFont();
-
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(window_size.x - 100);
-    ImGui::TextColored(ImColor(Colors::TextMuted), "v2.0");
-
-    ImGui::SetCursorPosY(75);
-
-    float content_width = window_size.x - 40;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Colors::Surface);
-    ImGui::BeginChild("DLLSection", ImVec2(content_width, 100), true, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos(ImVec2(15, 15));
-    ImGui::TextColored(ImColor(Colors::Accent), "DLL FILE");
+    ImGui::SameLine(windowWidth - 180);
+    ImGui::SetCursorPosY(28);
+    ImGui::TextColored(ImColor(Colors::TextSecondary), "v2.0 | Modern Injection Framework");
+    ImGui::EndChild();
     ImGui::Spacing();
+
+    float spacing = 20.0f;
+    float available = windowWidth - 40.0f - spacing;
+    float leftWidth = available * 0.5f;
+    float rightWidth = available * 0.5f;
+
+    ImGui::BeginChild("LeftColumn", ImVec2(leftWidth, windowHeight - 160), false);
+    ImGui::BeginChild("DLLCard", ImVec2(leftWidth - 20, 200), true);
     ImGui::SetCursorPosX(15);
-    ImGui::PushItemWidth(content_width - 150);
+    ImGui::SetCursorPosY(15);
+    ImGui::TextColored(ImColor(Colors::Accent), "DLL MODULE");
+    ImGui::SetCursorPosY(45);
+    ImGui::Separator();
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(70);
+    ImGui::PushItemWidth(leftWidth - 120);
     ImGui::InputText("##dllpath", g_state.dll_path, IM_ARRAYSIZE(g_state.dll_path), ImGuiInputTextFlags_ReadOnly);
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
-    if (ImGui::Button("Browse", ImVec2(100, 0))) {
-        OPENFILENAMEA ofn;
-        CHAR szFile[512] = { 0 };
-        ZeroMemory(&ofn, sizeof(ofn));
+    if (ImGui::Button("BROWSE", ImVec2(80, 32))) {
+        OPENFILENAMEA ofn = {};
+        char szFile[512] = {};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = g_hwnd;
         ofn.lpstrFile = szFile;
         ofn.nMaxFile = sizeof(szFile);
         ofn.lpstrFilter = "DLL Files\0*.dll\0All Files\0*.*\0";
-        ofn.nFilterIndex = 1;
-        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
         if (GetOpenFileNameA(&ofn)) {
             strcpy_s(g_state.dll_path, szFile);
@@ -379,191 +416,195 @@ void RenderUI() {
         }
     }
 
-    if (!g_state.selected_dll.empty()) {
+    if (strlen(g_state.dll_path) > 0) {
         ImGui::SetCursorPosX(15);
-        ImGui::TextColored(ImColor(Colors::TextSecondary), "Selected: ");
-        ImGui::SameLine();
-        std::string filename = g_state.selected_dll.substr(g_state.selected_dll.find_last_of("\\") + 1);
-        ImGui::TextColored(ImColor(Colors::Success), "%s", filename.c_str());
+        ImGui::SetCursorPosY(115);
+        ImGui::TextColored(ImColor(Colors::TextSecondary), "✓ %s",
+            g_state.selected_dll.substr(g_state.selected_dll.find_last_of("\\") + 1).c_str());
     }
 
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(150);
+    {
+        ImVec4 col = ImColor(Colors::TextSecondary).Value;
+        col.w *= 0.6f;
+        ImGui::TextColored(col, "Drag & drop DLL files here");
+    }
     ImGui::EndChild();
-    ImGui::PopStyleColor();
     ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Colors::Surface);
-    ImGui::BeginChild("ProcessSection", ImVec2(content_width, 280), true, ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetCursorPos(ImVec2(15, 15));
+    ImGui::BeginChild("ProcessCard", ImVec2(leftWidth - 20, windowHeight - 400), true);
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(15);
     ImGui::TextColored(ImColor(Colors::Accent), "TARGET PROCESS");
-    ImGui::Spacing();
+    ImGui::SetCursorPosY(45);
+    ImGui::Separator();
     ImGui::SetCursorPosX(15);
-    ImGui::PushItemWidth(content_width - 130);
-    if (ImGui::InputTextWithHint("##filter", "Filter processes...",
-        g_state.process_filter, IM_ARRAYSIZE(g_state.process_filter))) {
-    }
+    ImGui::SetCursorPosY(70);
+    ImGui::PushItemWidth(leftWidth - 150);
+    ImGui::InputTextWithHint("##filter", "🔍 Search processes...", g_state.process_filter, sizeof(g_state.process_filter));
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
-    if (ImGui::Button("Refresh", ImVec2(100, 0))) {
-        g_state.processes = GetProcessList();
-    }
-    ImGui::Spacing();
-    ImGui::SetCursorPosX(15);
-    ImGui::BeginChild("ProcessList", ImVec2(content_width - 30, 180), true);
-
-    if (g_state.processes.empty()) {
+    if (ImGui::Button("⟳", ImVec2(40, 32))) {
         g_state.processes = GetProcessList();
     }
 
-    for (const auto& proc : g_state.processes) {
-        if (g_state.process_filter[0] != '\0') {
-            if (proc.first.find(g_state.process_filter) == std::string::npos) continue;
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(115);
+    ImGui::BeginChild("ProcList", ImVec2(leftWidth - 50, windowHeight - 540), true);
+
+    if (g_state.processes.empty())
+        g_state.processes = GetProcessList();
+
+    std::string filterLower = ToLowerAscii(g_state.process_filter);
+    for (const auto& [name, pid] : g_state.processes) {
+        if (filterLower.size() > 0) {
+            std::string nameLower = ToLowerAscii(name);
+            if (nameLower.find(filterLower) == std::string::npos)
+                continue;
         }
 
-        bool is_selected = (g_state.selected_pid == proc.second);
-        ImGui::PushStyleColor(ImGuiCol_Header, is_selected ? Colors::Accent : Colors::Surface);
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Colors::SurfaceHover);
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, Colors::Accent);
-
-        std::string label = proc.first + " [" + std::to_string(proc.second) + "]";
-        if (ImGui::Selectable(label.c_str(), is_selected)) {
-            g_state.selected_pid = proc.second;
-            g_state.selected_process = proc.first;
+        bool selected = (g_state.selected_pid == pid);
+        if (ImGui::Selectable(std::format("{}  [{}]", name, pid).c_str(), selected)) {
+            g_state.selected_pid = pid;
+            g_state.selected_process = name;
         }
-
-        ImGui::PopStyleColor(3);
     }
-
     ImGui::EndChild();
     ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    ImGui::Spacing();
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Colors::Surface);
-    ImGui::BeginChild("SettingsSection", ImVec2(content_width, 100), true, ImGuiWindowFlags_NoScrollbar);
-
-    ImGui::SetCursorPos(ImVec2(15, 15));
-    ImGui::TextColored(ImColor(Colors::Accent), "SETTINGS");
-    ImGui::Spacing();
-
+    ImGui::EndChild();
+    ImGui::SameLine(0.0f, spacing);
+    ImGui::BeginChild("RightColumn", ImVec2(rightWidth, windowHeight - 160), false, ImGuiWindowFlags_NoMove);
+    ImGui::BeginChild("SettingsCard", ImVec2(rightWidth - 20, 250), true);
     ImGui::SetCursorPosX(15);
-    ModernCheckbox("Auto-inject on selection", &g_state.inject_on_select);
-
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(content_width / 2);
-    ModernCheckbox("Auto-close after inject", &g_state.auto_close);
-
+    ImGui::SetCursorPosY(15);
+    ImGui::TextColored(ImColor(Colors::Accent), "INJECTION SETTINGS");
+    ImGui::SetCursorPosY(45);
+    ImGui::Separator();
     ImGui::SetCursorPosX(15);
-    ImGui::Text("Method:");
-    ImGui::SameLine();
-    const char* methods[] = { "LoadLibrary", "Manual Map" };
-    ImGui::PushItemWidth(150);
+    ImGui::SetCursorPosY(75);
+    const char* methods[] = { "LoadLibrary (Classic)", "Manual Mapping (Stealth)" };
+    ImGui::SetCursorPosX(15);
     ImGui::Combo("##method", &g_state.injection_method, methods, IM_ARRAYSIZE(methods));
-    ImGui::PopItemWidth();
-
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(120);
+    ImGui::Checkbox("Auto-close after injection", &g_state.auto_close);
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(155);
+    ImGui::TextColored(ImColor(Colors::TextSecondary), "Method Info:");
+    ImGui::SetCursorPosX(15);
+    {
+        ImVec4 col = ImColor(Colors::TextSecondary).Value;
+        col.w *= 0.8f;
+        ImGui::TextColored(col,
+            g_state.injection_method == 0 ? "Standard injection, more compatible" : "Stealth injection, harder to detect");
+    }
     ImGui::EndChild();
-    ImGui::PopStyleColor();
-
     ImGui::Spacing();
+    ImGui::BeginChild("ActionCard", ImVec2(rightWidth - 20, 180), true);
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(15);
+    ImGui::TextColored(ImColor(Colors::Accent), "ACTIONS");
+    ImGui::SetCursorPosY(45);
+    ImGui::Separator();
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(75);
+    bool canInject = (g_state.selected_pid != 0 && strlen(g_state.dll_path) > 0);
 
-    ImVec2 btn_size(content_width, 50);
-    ImGui::SetCursorPosX(20);
-
-    bool can_inject = (g_state.selected_pid != 0 && strlen(g_state.dll_path) > 0);
-
-    if (can_inject) {
-        GlowButton("INJECT", btn_size, Colors::Accent);
-        if (ImGui::IsItemClicked()) {
-            if (InjectDLL(g_state.selected_pid, g_state.dll_path, g_state.injection_method)) {
-                g_state.show_success = true;
-                g_state.success_alpha = 1.0f;
-                g_state.status_message = "Successfully injected into " + g_state.selected_process;
-                if (g_state.auto_close) {
-                    std::thread([]() {
-                        std::this_thread::sleep_for(std::chrono::seconds(2));
-                        g_state.running = false;
-                        }).detach();
-                }
+    ImVec2 btnSize(rightWidth - 50, 48);
+    if (canInject) {
+        ImGui::PushStyleColor(ImGuiCol_Button, Colors::Success);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(56, 214, 123, 255));
+        if (ImGui::Button("🚀 INJECT NOW", btnSize)) {
+            bool success = InjectDLL(g_state.selected_pid, g_state.selected_dll, g_state.injection_method);
+            if (success) {
+                g_state.status_message = std::format("✓ Successfully injected into {}", g_state.selected_process);
+                g_state.status_type = 1;
+                g_state.status_timer = 3.0f;
+                if (g_state.auto_close)
+                    g_state.running = false;
             }
             else {
-                g_state.show_error = true;
-                g_state.error_alpha = 1.0f;
-                g_state.status_message = "Injection failed: " + GetLastErrorAsString();
+                g_state.status_message = "✗ Injection failed: " + GetLastErrorAsString();
+                g_state.status_type = 2;
+                g_state.status_timer = 3.0f;
             }
         }
+        ImGui::PopStyleColor(2);
     }
     else {
-        ImGui::PushStyleColor(ImGuiCol_Button, Colors::Surface);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Colors::Surface);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, Colors::Surface);
-        ImGui::Button("SELECT PROCESS AND DLL", btn_size);
-        ImGui::PopStyleColor(3);
+        ImGui::PushStyleColor(ImGuiCol_Button, Colors::CardBg);
+        ImGui::PushStyleColor(ImGuiCol_Text, Colors::TextSecondary);
+        ImGui::Button("⚠ SELECT DLL & PROCESS", btnSize);
+        ImGui::PopStyleColor(2);
     }
 
-    ImVec2 center(window_pos.x + window_size.x / 2, window_pos.y + window_size.y - 60);
+    ImGui::SetCursorPosX(15);
+    ImGui::SetCursorPosY(135);
+    ImGui::TextColored(ImColor(Colors::TextSecondary), "Selected: %s",
+        g_state.selected_pid ? std::format("{} ({})", g_state.selected_process, g_state.selected_pid).c_str() : "None");
+    ImGui::EndChild();
 
-    if (g_state.show_success && g_state.success_alpha > 0.01f) {
-        ImVec2 text_size = ImGui::CalcTextSize(g_state.status_message.c_str());
-        ImVec2 notif_pos(center.x - text_size.x / 2 - 15, center.y - 10);
-        ImVec2 notif_size(text_size.x + 30, 40);
+    ImGui::EndChild();
 
-        draw_list->AddRectFilled(notif_pos,
-            ImVec2(notif_pos.x + notif_size.x, notif_pos.y + notif_size.y),
-            ImColor(50, 220, 120, (int)(g_state.success_alpha * 255)),
-            6.0f);
-        draw_list->AddText(
-            ImVec2(notif_pos.x + 15, notif_pos.y + 10),
-            IM_COL32(255, 255, 255, (int)(g_state.success_alpha * 255)),
-            g_state.status_message.c_str()
-        );
+    ImGui::SetCursorPosY(windowHeight - 55);
+    ImGui::BeginChild("StatusBar", ImVec2(windowWidth - 40, 40), false);
+    ImDrawList* statusDraw = ImGui::GetWindowDrawList();
+    ImVec2 statusPos = ImGui::GetCursorScreenPos();
+    statusDraw->AddRectFilled(statusPos, ImVec2(statusPos.x + windowWidth - 40, statusPos.y + 40),
+        IM_COL32(28, 32, 37, 255), 8.0f, ImDrawFlags_RoundCornersBottom);
 
-        g_state.success_alpha -= 0.02f;
-        if (g_state.success_alpha <= 0) g_state.show_success = false;
+    if (g_state.status_timer > 0.0f) {
+        g_state.status_timer -= ImGui::GetIO().DeltaTime;
+        ImU32 statusColor = (g_state.status_type == 1) ? Colors::Success :
+            (g_state.status_type == 2) ? Colors::Error : Colors::TextSecondary;
+        ImGui::SetCursorPosX(15);
+        ImGui::SetCursorPosY(10);
+        ImGui::TextColored(ImColor(statusColor), "%s", g_state.status_message.c_str());
+    }
+    else {
+        ImGui::SetCursorPosX(15);
+        ImGui::SetCursorPosY(10);
+        ImGui::TextColored(ImColor(Colors::TextSecondary), "Ready | Encryptic Injector v2.0");
     }
 
-    if (g_state.show_error && g_state.error_alpha > 0.01f) {
-        ImVec2 text_size = ImGui::CalcTextSize(g_state.status_message.c_str());
-        ImVec2 notif_pos(center.x - text_size.x / 2 - 15, center.y - 10);
-        ImVec2 notif_size(text_size.x + 30, 40);
-
-        draw_list->AddRectFilled(notif_pos,
-            ImVec2(notif_pos.x + notif_size.x, notif_pos.y + notif_size.y),
-            ImColor(255, 80, 80, (int)(g_state.error_alpha * 255)),
-            6.0f);
-        draw_list->AddText(
-            ImVec2(notif_pos.x + 15, notif_pos.y + 10),
-            IM_COL32(255, 255, 255, (int)(g_state.error_alpha * 255)),
-            g_state.status_message.c_str()
-        );
-
-        g_state.error_alpha -= 0.02f;
-        if (g_state.error_alpha <= 0) g_state.show_error = false;
+    ImGui::SameLine(windowWidth - 120);
+    ImGui::SetCursorPosY(10);
+    if (ImGui::Button("About", ImVec2(80, 28))) {
+        MessageBoxA(g_hwnd,
+            "Encryptic Injector v2.0\n\nModern DLL Injection \n\nFeatures:\n• LoadLibrary Injection\n• Manual Mapping\n• Drag & Drop Support\n• Process Filtering\n\nDeveloped by Longno",
+            "About Encryptic Injector", MB_OK | MB_ICONINFORMATION);
     }
 
-    ImGui::SetCursorPosY(window_size.y - 25);
-    ImGui::Separator();
-    ImGui::TextColored(ImColor(Colors::TextMuted), "Ready");
-
-    if (g_state.selected_pid != 0) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImColor(Colors::TextSecondary), "| Target: ");
-        ImGui::SameLine();
-        ImGui::TextColored(ImColor(Colors::Accent), "%s (PID: %d)",
-            g_state.selected_process.c_str(), g_state.selected_pid);
-    }
+    ImGui::EndChild();
 
     ImGui::End();
-    ImGui::PopStyleVar();
 
-    g_state.animation_time += io.DeltaTime;
+    g_state.animation_offset += io.DeltaTime;
 }
 
-void CreateRenderTarget();
-void CleanupRenderTarget();
+void CreateRenderTarget() {
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    if (pBackBuffer) {
+        g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+        pBackBuffer->Release();
+    }
+}
+
+void CleanupRenderTarget() {
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+}
+
+void CleanupDeviceD3D() {
+    CleanupRenderTarget();
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+}
 
 bool CreateDeviceD3D(HWND hWnd) {
-    DXGI_SWAP_CHAIN_DESC sd;
-    ZeroMemory(&sd, sizeof(sd));
+    DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 2;
     sd.BufferDesc.Width = 0;
     sd.BufferDesc.Height = 0;
@@ -578,35 +619,17 @@ bool CreateDeviceD3D(HWND hWnd) {
     sd.Windowed = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    UINT createDeviceFlags = 0;
-    D3D_FEATURE_LEVEL featureLevel;
-    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0, };
+    UINT createFlags = 0;
+    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    D3D_FEATURE_LEVEL selected;
 
-    if (D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, createDeviceFlags,
-        featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain,
-        &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext) != S_OK)
+    if (D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createFlags,
+        featureLevels, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain,
+        &g_pd3dDevice, &selected, &g_pd3dDeviceContext) != S_OK)
         return false;
 
     CreateRenderTarget();
     return true;
-}
-
-void CleanupDeviceD3D() {
-    CleanupRenderTarget();
-    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
-    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
-    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
-}
-
-void CreateRenderTarget() {
-    ID3D11Texture2D* pBackBuffer;
-    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
-    pBackBuffer->Release();
-}
-
-void CleanupRenderTarget() {
-    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
 }
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -616,11 +639,28 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return true;
 
     switch (msg) {
+    case WM_DROPFILES: {
+        HDROP hDrop = (HDROP)wParam;
+        UINT count = DragQueryFileA(hDrop, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < count; ++i) {
+            char filePath[MAX_PATH];
+            if (DragQueryFileA(hDrop, i, filePath, MAX_PATH)) {
+                if (IsDllFilePath(filePath)) {
+                    strcpy_s(g_state.dll_path, filePath);
+                    g_state.selected_dll = filePath;
+                    g_state.status_message = "✓ DLL loaded successfully";
+                    g_state.status_type = 1;
+                    g_state.status_timer = 2.0f;
+                }
+            }
+        }
+        DragFinish(hDrop);
+        return 0;
+    }
     case WM_SIZE:
-        if (g_pd3dDevice != NULL && wParam != SIZE_MINIMIZED) {
+        if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
             CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam),
-                DXGI_FORMAT_UNKNOWN, 0);
+            g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
             CreateRenderTarget();
         }
         return 0;
@@ -636,12 +676,13 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L,
-                      GetModuleHandle(NULL), NULL, NULL, NULL, NULL, TEXT("Injector"), NULL };
+                      GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr,
+                      TEXT("Encryptic Injector"), nullptr };
     RegisterClassEx(&wc);
 
-    g_hwnd = CreateWindow(wc.lpszClassName, TEXT("Modern Injector"),
+    g_hwnd = CreateWindow(wc.lpszClassName, TEXT("Encryptic Injector"),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        100, 100, 500, 700, NULL, NULL, wc.hInstance, NULL);
+        200, 100, 980, 700, nullptr, nullptr, wc.hInstance, nullptr);
 
     if (!CreateDeviceD3D(g_hwnd)) {
         CleanupDeviceD3D();
@@ -649,23 +690,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
+    DragAcceptFiles(g_hwnd, TRUE);
     ShowWindow(g_hwnd, SW_SHOWDEFAULT);
     UpdateWindow(g_hwnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
+    io.Fonts->AddFontDefault();
+    ImFont* fontMedium = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f);
+    if (!fontMedium) io.Fonts->AddFontDefault();
 
-    SetupImGuiStyle();
+    SetupModernStyle();
 
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    MSG msg;
-    ZeroMemory(&msg, sizeof(msg));
+    MSG msg{};
     while (g_state.running && msg.message != WM_QUIT) {
-        if (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE)) {
+        if (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             continue;
@@ -678,9 +723,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         RenderUI();
 
         ImGui::Render();
-        const float clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         g_pSwapChain->Present(1, 0);

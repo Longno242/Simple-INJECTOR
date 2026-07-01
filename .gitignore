@@ -1,0 +1,21 @@
+# Build output
+**/x64/
+**/x86/
+**/Debug/
+**/Release/
+**/.vs/
+*.user
+*.suo
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.iobj
+*.ipdb
+*.tlog
+
+# ImGui generated
+imgui.ini
+injector_settings.ini

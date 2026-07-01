@@ -975,8 +975,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImFontConfig fc;
     fc.OversampleH = 2;
     fc.OversampleV = 1;
-    g_fontBody = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 13.0f, &fc);
-    if (!g_fontBody) g_fontBody = io.Fonts->AddFontDefault();
+    fc.SizePixels = 13.0f;
+    g_fontBody = io.Fonts->AddFontDefault(&fc);
     io.FontDefault = g_fontBody;
 
     SetupModernStyle();

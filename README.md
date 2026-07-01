@@ -1,6 +1,10 @@
 # Encryptic Injector
 
-A small Windows DLL injector with a simple ImGui interface.
+A small Windows DLL injector with a simple ImGui interface. The release is a single portable `.exe` — no extra files needed.
+
+## Download
+
+**[Latest release (v3)](https://github.com/Longno242/Simple-INJECTOR/releases/latest)** — download `Encryptic Injector.exe` and run it.
 
 ## Features
 

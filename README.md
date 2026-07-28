@@ -4,15 +4,19 @@ A small Windows DLL injector with a simple ImGui interface. The release is a sin
 
 ## Download
 
-**[Latest release (v3)](https://github.com/Longno242/Simple-INJECTOR/releases/latest)** — download `Encryptic Injector.exe` and run it.
+**[Latest release (v4)](https://github.com/Longno242/Simple-INJECTOR/releases/latest)** — download `Encryptic Injector.exe` and run it.
 
 ## Features
 
-- Process list with search
+- Process list with search and x64/x86 labels
 - Drag & drop DLL support
+- Async inject (UI stays responsive)
+- Settings persistence (`injector_settings.ini`)
+- Arch mismatch checks + optional match-arch filter
+- Admin elevation banner
 - 7 injection methods:
   - LoadLibrary (Standard)
-  - Manual Map (Stealth)
+  - Manual Map (with TLS, section protections, custom remote stub)
   - NtCreateThreadEx
   - QueueUserAPC
   - RtlCreateUserThread

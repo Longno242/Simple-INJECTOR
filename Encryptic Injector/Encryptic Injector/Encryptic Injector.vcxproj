@@ -135,9 +135,23 @@
     <ClCompile Include="imgui\imgui_draw.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
-    <ClCompile Include="Injection.cpp" />
+    <ClCompile Include="Utils.cpp" />
+    <ClCompile Include="Process.cpp" />
+    <ClCompile Include="Settings.cpp" />
+    <ClCompile Include="InjectionCommon.cpp" />
+    <ClCompile Include="InjectionMethods.cpp" />
+    <ClCompile Include="ManualMap.cpp" />
+    <ClCompile Include="Ui.cpp" />
+    <ClCompile Include="Main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="AppState.h" />
+    <ClInclude Include="Utils.h" />
+    <ClInclude Include="Process.h" />
+    <ClInclude Include="Settings.h" />
+    <ClInclude Include="Injection.h" />
+    <ClInclude Include="InjectionCommon.h" />
+    <ClInclude Include="Ui.h" />
     <ClInclude Include="imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="imgui\imconfig.h" />
